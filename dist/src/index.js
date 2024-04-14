@@ -5,13 +5,17 @@ config();
 import { connect } from "mongoose";
 import User from "../models/user.js";
 import mongoose from "mongoose";
+import { GraphQLError } from "graphql";
+import jwt from "jsonwebtoken";
 mongoose.set("strictQuery", false);
 const typeDefs = `#graphql
+
  type User {
     _id: ID
     username: String
     email: String
     address: String
+    role: String
   }
 
   input PaginationInput {
@@ -19,9 +23,8 @@ const typeDefs = `#graphql
     page: Int
   }
 
-  input FilterInput {
-    username: String
-    email: String
+  input SortInput {
+    sortBy: String
   }
 
   type UsersResponse {
@@ -29,6 +32,35 @@ const typeDefs = `#graphql
     success: Boolean
     data: [User]
     pageInfo: PageInfo
+    message:String
+  }
+
+  type UserCreateResponse {
+    status: Int
+    success: Boolean
+    message: String
+    data: User
+  }
+
+  type LgoinResponse {
+    status: Int
+    success: Boolean
+    user: User
+    token: String
+    message:String
+  }
+
+  type SingleUserResponse  {
+    status: Int
+    success: Boolean
+    user: User
+  }
+
+  type UserUpdateDeleteResponse  {
+    status: Int
+    success: Boolean
+    message: String
+    user: User
   }
 
   type PageInfo {
@@ -38,8 +70,8 @@ const typeDefs = `#graphql
   }
 
   type Query {
-    getUser(ID: ID!): User
-    getUsers(pagination: PaginationInput, filter: FilterInput): UsersResponse!
+    getUser(ID: ID!): SingleUserResponse!
+    getUsers(pagination: PaginationInput, sort: SortInput): UsersResponse!
   }
 
   input UserInput {
@@ -49,22 +81,35 @@ const typeDefs = `#graphql
     address: String
   }
 
+  input UpdateUserInput {
+    username: String
+    email: String
+    address: String
+  }
+
   type Mutation {
-    createUser(userInput: UserInput): User!
-    loginUser(email: String!, password: String!): String!
-    updateUser(ID: ID!, userInput: UserInput): User!
-    deleteUser(ID: ID!): String!
+    createUser(userInput: UserInput): UserCreateResponse!
+    loginUser(email: String!, password: String!): LgoinResponse!
+    updateUser(ID: ID!, userInput: UpdateUserInput): UserUpdateDeleteResponse!
+    deleteUser(ID: ID!): UserUpdateDeleteResponse!
   }
 `;
 const resolvers = {
     Query: {
-        async getUser(_, { ID }) {
+        async getUser(_, { ID }, { user }) {
             try {
-                const user = await User.findById(ID);
-                if (!user) {
+                if (user.role !== "Admin") {
+                    return {
+                        success: false,
+                        status: 403,
+                        message: "Forbidden",
+                    };
+                }
+                const singleUser = await User.findById(ID);
+                if (!singleUser) {
                     throw new Error("User not found");
                 }
-                return { status: 200, success: true, data: user };
+                return { status: 200, success: true, user: singleUser };
             }
             catch (error) {
                 return {
@@ -75,18 +120,21 @@ const resolvers = {
                 };
             }
         },
-        async getUsers(_, { pagination, filter }) {
+        async getUsers(_, { pagination, sort }, { user }) {
             try {
                 const { limit, page } = pagination || {};
-                const { username, email } = filter || {};
-                const query = {};
-                if (username) {
-                    query["username"] = username;
+                const { sortBy } = sort || {};
+                if (user.role !== "Admin") {
+                    return {
+                        success: false,
+                        status: 403,
+                        message: "Forbidden",
+                    };
                 }
-                if (email) {
-                    query["email"] = email;
+                const usersQuery = User.find();
+                if (sortBy) {
+                    usersQuery.sort(sortBy);
                 }
-                const usersQuery = User.find(query);
                 if (limit) {
                     usersQuery.limit(limit);
                 }
@@ -94,13 +142,14 @@ const resolvers = {
                     usersQuery.skip((page - 1) * (limit || 0));
                 }
                 const users = await usersQuery.exec();
-                const totalUsers = await User.countDocuments(query);
+                const totalUsers = await User.countDocuments();
                 const totalPages = Math.ceil(totalUsers / (limit || 10));
                 return {
                     status: 200,
                     success: true,
                     data: users,
                     pageInfo: { totalUsers, totalPages, currentPage: page },
+                    message: null,
                 };
             }
             catch (error) {
@@ -114,11 +163,18 @@ const resolvers = {
         },
     },
     Mutation: {
-        async createUser(_, { userInput }) {
+        async createUser(_, { userInput }, { user }) {
             try {
+                if (user.role !== "Admin") {
+                    return {
+                        success: false,
+                        status: 403,
+                        message: "Forbidden",
+                    };
+                }
                 const { username, email, password, address } = userInput;
-                const user = new User({ username, email, password, address });
-                await user.save();
+                const createdUser = new User({ username, email, password, address });
+                await createdUser.save();
                 return {
                     status: 201,
                     success: true,
@@ -127,12 +183,22 @@ const resolvers = {
                 };
             }
             catch (error) {
-                return {
-                    status: 500,
-                    success: false,
-                    message: "Internal Server Error",
-                    error: error.message,
-                };
+                if (error.name === "MongoServerError" && error.code === 11000) {
+                    return {
+                        status: 400,
+                        success: false,
+                        message: "Email already exists",
+                        error: error.message,
+                    };
+                }
+                else {
+                    return {
+                        status: 500,
+                        success: false,
+                        message: "Internal Server Error",
+                        error: error.message,
+                    };
+                }
             }
         },
         async loginUser(_, { email, password }) {
@@ -146,69 +212,88 @@ const resolvers = {
                     throw new Error("Invalid password");
                 }
                 const token = user.generateAuthToken();
-                return { status: 200, success: true, data: { user, token } };
+                return {
+                    status: 200,
+                    success: true,
+                    user: user,
+                    token: token,
+                    userData: user,
+                    message: "Login successfully",
+                };
             }
             catch (error) {
                 return {
                     status: 500,
                     success: false,
-                    message: "Internal Server Error",
-                    error: error.message,
+                    message: error.message,
                 };
             }
         },
-        async updateUser(_, { ID, userInput }) {
+        async updateUser(_, { ID, userInput }, { user }) {
             try {
-                const user = await User.findById(ID);
-                if (!user) {
+                if (user.role !== "Admin") {
+                    return {
+                        success: false,
+                        status: 403,
+                        message: "Forbidden",
+                    };
+                }
+                const singleUser = await User.findById(ID);
+                if (!singleUser) {
                     throw new Error("User not found");
                 }
-                const { username, email, password, address } = userInput;
-                user.username = username;
-                user.email = email;
-                user.password = password;
-                user.address = address;
-                await user.save();
+                const { username, email, address } = userInput;
+                singleUser.username = username;
+                singleUser.email = email;
+                singleUser.address = address;
+                await singleUser.save();
                 return {
                     status: 200,
                     success: true,
                     message: "User updated successfully",
-                    data: user,
+                    user: singleUser,
                 };
             }
             catch (error) {
                 return {
                     status: 500,
                     success: false,
-                    message: "Internal Server Error",
-                    error: error.message,
+                    message: error.message,
                 };
             }
         },
-        async deleteUser(_, { ID }) {
+        async deleteUser(_, { ID }, { user }) {
             try {
-                const user = await User.findByIdAndDelete(ID);
-                if (!user) {
+                if (user.role !== "Admin") {
+                    return {
+                        success: false,
+                        status: 403,
+                        message: "Forbidden",
+                    };
+                }
+                const deletedUser = await User.findByIdAndDelete(ID);
+                if (!deletedUser) {
                     throw new Error("User not found");
                 }
                 return {
                     status: 200,
                     success: true,
                     message: "User deleted successfully",
+                    user: deletedUser,
                 };
             }
             catch (error) {
+                console.log("Deleted Error:", error);
                 return {
                     status: 500,
                     success: false,
-                    message: "Internal Server Error",
-                    error: error.message,
+                    message: error.message,
                 };
             }
         },
     },
 };
-await connect(process.env.DB_URL)
+await connect(process.env.DB_URL2)
     .then((res) => {
     if (res) {
         console.log("Connected to database successfully");
@@ -220,9 +305,37 @@ await connect(process.env.DB_URL)
 const server = new ApolloServer({
     typeDefs,
     resolvers,
+    introspection: true,
 });
 const port = Number.parseInt(process.env.PORT);
 const { url } = await startStandaloneServer(server, {
+    context: async ({ req, res }) => {
+        const token = req.headers.authorization.split(" ")[1];
+        if (token) {
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                if (typeof decoded === "string" || !("userId" in decoded)) {
+                    throw new GraphQLError("Invalid token", {
+                        extensions: {
+                            code: "INVALID_TOKEN",
+                            http: { status: 401 },
+                        },
+                    });
+                }
+                const userId = decoded.userId;
+                const user = await User.findById(userId);
+                return { token, user };
+            }
+            catch (error) {
+                throw new GraphQLError("Invalid token", {
+                    extensions: {
+                        code: "INVALID_TOKEN",
+                        http: { status: 401 },
+                    },
+                });
+            }
+        }
+    },
     listen: { port: port },
 });
 console.log(`Server is ready at ${url}`);

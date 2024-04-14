@@ -14,8 +14,8 @@ interface IUser extends Document {
 
 const userSchema = new Schema<IUser>({
   username: { type: String, required: true },
-  email: { type: String, required: true },
-  password: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String },
   address: { type: String, required: true },
   role: { type: String, default: "User" },
 });
@@ -40,6 +40,7 @@ userSchema.methods.generateAuthToken = function (): string {
     userId: this._id,
     username: this.username,
     email: this.email,
+    role: this.role,
   };
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "1h" });
 };
